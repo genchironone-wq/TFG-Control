@@ -45,20 +45,22 @@ public sealed class ServerState {
  public static string Advice(bool running,bool ready,bool oom,double heap,double max,double free,double tps,int pressure,int count,int limit,bool lag){
   if(oom)return "Java сообщила о нехватке памяти. После остановки увеличьте лимит на 2 ГБ, если на ПК есть запас. При повторении ошибки нужен журнал — причиной может быть мод или утечка.";
   if(free<2)return "На компьютере осталось меньше 2 ГБ свободной ОЗУ. Закройте лишние программы. Сейчас увеличивать память серверу не стоит.";
-  if(!running)return "Всё готово к запуску. Первый старт сборки может занять несколько минут.";
-  if(!ready)return "Загружаются моды и мир. Дождитесь статуса «Работает». Во время старта нагрузка может быть высокой.";
-  if(pressure>=3){if(free>=4)return "Java heap заполнена более чем на 88% несколько замеров подряд. Можно выделить ещё 2 ГБ после остановки и проверить, стало ли лучше.";return "Java heap почти заполнена, но свободной памяти ПК мало. Закройте лишнее или уменьшите нагрузку на мир.";}
-  if((!double.IsNaN(tps)&&tps<18)||lag)return "Сервер не успевает обрабатывать мир. Снизьте дальность симуляции, генерацию чанков или нагрузку механизмов. Дополнительная ОЗУ помогает только при нехватке памяти.";
+  if(!running)return "Всё готово. Запустите сервер, чтобы друзья могли присоединиться.";
+  if(!ready)return "Готовим ваш мир. Дождитесь статуса «Работает» — первый запуск может занять несколько минут.";
+  if(pressure>=3){if(free>=4)return "Память сервера почти заполнена несколько замеров подряд. Можно выделить ещё 2 ГБ в настройках после остановки.";return "Память сервера почти заполнена, но на компьютере тоже мало свободного места в ОЗУ. Закройте лишние программы или уменьшите нагрузку на мир.";}
+  if((!double.IsNaN(tps)&&tps<18)||lag)return "Мир начинает тормозить. Попробуйте уменьшить дальность игры или нагрузку механизмов. Добавлять память стоит только при её нехватке.";
   if(count>=limit-1 && count>0)return "Места почти закончились. При необходимости увеличьте максимум игроков в настройках после остановки. Это не увеличивает память автоматически.";
-  return "Нагрузка без явных признаков нехватки памяти. Выделять больше ОЗУ только из-за числа игроков не требуется.";
+  return "Сервер справляется с нагрузкой. Можно спокойно играть — добавлять память сейчас не требуется.";
  }
 }
 
-public sealed class PanelApp {
+public sealed partial class PanelApp {
  static string capturePath;
+ static int captureTab; static bool captureDemo;
  static bool integrationMode; static string integrationResult;
  [StructLayout(LayoutKind.Sequential)] class Mem {public uint Length=(uint)Marshal.SizeOf(typeof(Mem));public uint Load;public ulong Total,Avail,TotalPage,AvailPage,TotalVirtual,AvailVirtual,Extended;}
  [DllImport("kernel32.dll",SetLastError=true)]static extern bool GlobalMemoryStatusEx([In,Out]Mem m);
+ [DllImport("dwmapi.dll")]static extern int DwmSetWindowAttribute(IntPtr hwnd,int attribute,ref int value,int size);
  readonly string root; Window w; Process server; FileStream appLock; DispatcherTimer timer;
  readonly ConcurrentQueue<string> lines=new ConcurrentQueue<string>(); readonly ServerState state=new ServerState();
  readonly List<double> history=new List<double>(); double heap=double.NaN; DateTime heapTime=DateTime.MinValue;
@@ -67,7 +69,7 @@ public sealed class PanelApp {
  double totalMemory=32,availableMemory=16;
  const string ForgeArgs="libraries/net/minecraftforge/forge/1.20.1-47.4.13/win_args.txt";
  public PanelApp(string folder){root=folder;}
- T Find<T>(string n) where T:class{return w.FindName(n) as T;}
+ T Find<T>(string n) where T:class{var result=w.FindName(n) as T;if(result!=null)return result;var tabs=w.FindName("Tabs") as TabControl;if(tabs!=null){tabs.ApplyTemplate();return tabs.Template.FindName(n,tabs) as T;}return null;}
  void Text(string n,string value){Find<TextBlock>(n).Text=value;}
  void Message(string s){MessageBox.Show(w,s,"TFG · Сервер для друзей",MessageBoxButton.OK,MessageBoxImage.Information);}
  bool Running {get{try{return server!=null&&!server.HasExited;}catch{return false;}}}
@@ -79,6 +81,8 @@ public sealed class PanelApp {
  public void Run(){
   try{appLock=new FileStream(System.IO.Path.Combine(root,".tfg-panel.lock"),FileMode.OpenOrCreate,FileAccess.ReadWrite,FileShare.None);}catch{MessageBox.Show("Панель для этой папки уже открыта.","TFG");return;}
   var app=new Application();using(var stream=typeof(PanelApp).Assembly.GetManifestResourceStream("Panel.xaml"))w=(Window)XamlReader.Load(stream);
+  w.SourceInitialized+=(s,e)=>{try{int dark=1;DwmSetWindowAttribute(new System.Windows.Interop.WindowInteropHelper(w).Handle,20,ref dark,4);}catch{}};
+  BuildPlanet();
   ReadMemory();var args=System.IO.Path.Combine(root,"user_jvm_args.txt");if(File.Exists(args)){var m=Regex.Match(File.ReadAllText(args),@"-Xmx(\d+)([GM])",RegexOptions.IgnoreCase);if(m.Success){int v=int.Parse(m.Groups[1].Value);ram=m.Groups[2].Value.Equals("M",StringComparison.OrdinalIgnoreCase)?Math.Max(4,v/1024):v;}}
   int.TryParse(GetProp("max-players","10"),out maxPlayers);if(maxPlayers<1)maxPlayers=10;
   var slider=Find<Slider>("RamSlider");slider.Maximum=Math.Max(4,Math.Min(32,Math.Floor(totalMemory-5)));slider.Value=Math.Max(4,Math.Min(slider.Maximum,ram));ram=(int)slider.Value;
@@ -93,11 +97,11 @@ public sealed class PanelApp {
   w.Closing+=(s,e)=>{if(Running){e.Cancel=true;if(stopping){Message("Сервер сохраняется и останавливается. Дождитесь завершения.");return;}if(MessageBox.Show(w,"Сохранить мир, остановить сервер и закрыть приложение? Пока сервер выключен, друзья не смогут играть.","Закрыть панель",MessageBoxButton.YesNo,MessageBoxImage.Question)==MessageBoxResult.Yes){closeAfter=true;Stop();}}};
   w.Closed+=(s,e)=>{if(timer!=null)timer.Stop();if(appLock!=null)appLock.Dispose();};
   timer=new DispatcherTimer{Interval=TimeSpan.FromSeconds(2)};timer.Tick+=(s,e)=>Tick();timer.Start();Tick();
-  if(capturePath!=null)w.ContentRendered+=(s,e)=>w.Dispatcher.BeginInvoke(new Action(()=>{w.UpdateLayout();var bitmap=new RenderTargetBitmap((int)w.ActualWidth,(int)w.ActualHeight,96,96,PixelFormats.Pbgra32);bitmap.Render(w);var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(bitmap));using(var fs=File.Create(capturePath))encoder.Save(fs);w.Close();}),DispatcherPriority.ApplicationIdle);
+  if(capturePath!=null)w.ContentRendered+=(s,e)=>w.Dispatcher.BeginInvoke(new Action(()=>{Find<TabControl>("Tabs").SelectedIndex=captureTab;w.UpdateLayout();if(captureDemo){state.Names.UnionWith(new[]{"Alex","Steve","Masha"});Text("PlayersMetric","3 / 10");Text("PlayersCaption","Пример отображения игроков");}RenderPlanetPlayers();if(captureDemo)Text("PlanetCaption","Пример · маркеры игроков, не реальные координаты");w.UpdateLayout();w.Dispatcher.BeginInvoke(new Action(CaptureView),DispatcherPriority.ApplicationIdle);}),DispatcherPriority.ApplicationIdle);
   if(integrationMode)w.ContentRendered+=(s,e)=>BeginIntegration();
   app.Run(w);
  }
- void UpdateRamHint(){int value=(int)Find<Slider>("RamSlider").Value;Text("RamValue","Лимит памяти: "+value+" ГБ");Text("RamAdvice","На этом ПК: "+totalMemory.ToString("0.#")+" ГБ ОЗУ. "+(value>totalMemory-12?"Вы оставляете небольшой запас для Windows и своей игры. Начните с 8 ГБ и следите за показателями.":"Оставьте запас для Windows, своей игры и остальных программ."));}
+ void UpdateRamHint(){int value=(int)Find<Slider>("RamSlider").Value;Text("RamValue","Память сервера · "+value+" ГБ");Text("RamAdvice","На этом компьютере "+totalMemory.ToString("0.#")+" ГБ памяти. "+(value>totalMemory-12?"Оставляйте запас для Windows и своей игры. Начните с 8 ГБ и следите за подсказками.":"Не отдавайте серверу всю память: она нужна Windows, игре и остальным программам."));}
  bool SaveSettings(){
   if(Running){Message("Сначала остановите сервер кнопкой «Остановить».");return false;}
   int limit;if(!int.TryParse(Find<TextBox>("MaxPlayersBox").Text,out limit)||limit<1||limit>100){Message("Количество мест должно быть целым числом от 1 до 100.");return false;}
@@ -131,30 +135,31 @@ public sealed class PanelApp {
  void Stop(){if(!Running)return;if(!stopping){stopping=true;stopAt=DateTime.UtcNow;state.Activity="Сохраняем мир и останавливаем сервер…";Send("stop");Find<Button>("SaveButton").IsEnabled=false;Find<Button>("StopButton").Content="Останавливается…";}
   else if((DateTime.UtcNow-stopAt).TotalSeconds>120 && MessageBox.Show(w,"Сервер не завершился за две минуты. Принудительная остановка может потерять несохранённые изменения мира. Завершить процесс?","Принудительная остановка",MessageBoxButton.YesNo,MessageBoxImage.Warning)==MessageBoxResult.Yes){try{server.Kill();}catch(Exception ex){Message(ex.Message);}}
  }
- void Controls(bool running){Find<Button>("StartButton").IsEnabled=!running;Find<Button>("StopButton").IsEnabled=running;Find<Button>("SaveButton").IsEnabled=running&&state.Ready&&!stopping;Find<Button>("ApplyButton").IsEnabled=!running;Find<Slider>("RamSlider").IsEnabled=!running;Find<TextBox>("MaxPlayersBox").IsEnabled=!running;if(!running)Find<Button>("StopButton").Content="■  Остановить";}
+ void Controls(bool running){Find<Button>("StartButton").IsEnabled=!running;Find<Button>("StopButton").IsEnabled=running;Find<Button>("SaveButton").IsEnabled=running&&state.Ready&&!stopping;Find<Button>("ApplyButton").IsEnabled=!running;Find<Slider>("RamSlider").IsEnabled=!running;Find<TextBox>("MaxPlayersBox").IsEnabled=!running;if(!running)Find<Button>("StopButton").Content="Остановить";}
  void Tick(){
   string line;var builder=new StringBuilder();int n=0;while(n++<3000&&lines.TryDequeue(out line)){state.Parse(line);builder.AppendLine(line);}
   if(builder.Length>0){var box=Find<TextBox>("LogBox");if(box.Text.Length>140000)box.Text=box.Text.Substring(box.Text.Length-80000);box.AppendText(builder.ToString());box.ScrollToEnd();}
   ReadMemory();bool running=Running;DateTime now=DateTime.UtcNow;
-  if(!running&&server!=null&&lastExit<0){try{lastExit=server.ExitCode;}catch{lastExit=1;}state.Ready=false;state.Names.Clear();state.Players=0;if(stopping&&lastExit==0)state.Activity="Сервер остановлен. Мир сохранён.";else state.Activity="Сервер завершился, код "+lastExit+". Подробности — во вкладке «Журнал».";stopping=false;Controls(false);if(closeAfter){w.Close();return;}}
+  if(!running&&server!=null&&lastExit<0){try{lastExit=server.ExitCode;}catch{lastExit=1;}state.Ready=false;state.Names.Clear();state.Players=0;if(stopping&&lastExit==0)state.Activity="Сервер остановлен. Мир сохранён.";else state.Activity="Сервер завершился, код "+lastExit+". Подробности — во вкладке «События».";stopping=false;Controls(false);if(closeAfter){w.Close();return;}}
   if(running){
-   try{server.Refresh();double seconds=(now-lastSample).TotalSeconds;double cpu=seconds>0?(server.TotalProcessorTime-lastCpu).TotalSeconds/seconds/Environment.ProcessorCount*100:0;lastCpu=server.TotalProcessorTime;lastSample=now;Text("CpuMetric",Math.Max(0,Math.Min(100,cpu)).ToString("0.#")+" %");Text("HeapCaption","Процесс в ОЗУ: "+(server.WorkingSet64/1073741824.0).ToString("0.0")+" ГБ · heap отдельно");}catch{}
+   try{server.Refresh();double seconds=(now-lastSample).TotalSeconds;double cpu=seconds>0?(server.TotalProcessorTime-lastCpu).TotalSeconds/seconds/Environment.ProcessorCount*100:0;lastCpu=server.TotalProcessorTime;lastSample=now;Text("CpuMetric",Math.Max(0,Math.Min(100,cpu)).ToString("0.#")+" %");Text("HeapCaption","Из выделенного лимита");Find<TextBlock>("HeapMetric").ToolTip="Вся программа занимает в ОЗУ "+(server.WorkingSet64/1073741824.0).ToString("0.0")+" ГБ. Основной показатель — память игровых данных Java.";}catch{}
    ticks++;if(ticks%8==1&&!probing)ProbeHeap();if(state.Ready&&!stopping){Find<Button>("SaveButton").IsEnabled=true;if(ticks%8==0)Send("list");if(ticks%15==0)Send("forge tps");}
-   Text("StateLabel",stopping?"●  Остановка":state.Ready?"●  Работает":"●  Запускается");Find<TextBlock>("StateLabel").Foreground=new SolidColorBrush(state.Ready?Color.FromRgb(124,225,183):Color.FromRgb(238,199,119));
-   Text("UptimeLabel","Время работы: "+(now-started).ToString(@"hh\:mm\:ss"));Text("RunHint",stopping?"Не выключайте компьютер":"Лимит Java: "+launchedRam+" ГБ");
+   Text("StateLabel",stopping?"●  Остановка":state.Ready?"●  Работает":"●  Запускается");Find<TextBlock>("StateLabel").Foreground=new SolidColorBrush(state.Ready?Color.FromRgb(171,192,151):Color.FromRgb(218,164,113));
+   Text("HeroTitle",stopping?"Сохраняем мир":state.Ready?"Можно заходить":"Мир загружается");Text("HeroDescription",stopping?"Оставьте окно открытым, пока сервер завершает работу.":state.Ready?"Сервер готов. Заходите в игру и отправьте друзьям адрес.":"Подготавливаем моды и ваш мир. Это может занять несколько минут.");
+   Text("UptimeLabel","В игре "+(now-started).ToString(@"hh\:mm\:ss"));Text("RunHint",stopping?"Не выключайте компьютер":"Для сервера выделено "+launchedRam+" ГБ");
    if(stopping&&(now-stopAt).TotalSeconds>120)Find<Button>("StopButton").Content="Завершить принудительно";
-  }else{Text("StateLabel","●  Остановлен");Find<TextBlock>("StateLabel").Foreground=new SolidColorBrush(Color.FromRgb(166,178,196));Text("UptimeLabel","Мир хранится в папке world");Text("CpuMetric","—");Text("HeapCaption","Показатели появятся после запуска");Text("RunHint","Java 17 уже в комплекте");}
+  }else{Text("StateLabel","●  Остановлен");Find<TextBlock>("StateLabel").Foreground=new SolidColorBrush(Color.FromRgb(154,165,174));Text("UptimeLabel","Сервер на этом ПК");Text("CpuMetric","—");Text("HeapCaption","Данные после запуска");Text("HeroTitle","Готовы начать?");Text("HeroDescription","Запустите сервер и зовите друзей в общий мир.");Text("RunHint","Для сервера выделено "+ram+" ГБ");}
   bool freshHeap=running&&(now-heapTime).TotalSeconds<45&&!double.IsNaN(heap);
   Text("HeapMetric",(freshHeap?heap.ToString("0.0"):"—")+" / "+(running?launchedRam:ram)+" ГБ");
   history.Add(freshHeap?heap:double.NaN);if(history.Count>60)history.RemoveAt(0);DrawChart();
   bool freshTps=running&&(now-state.TpsTime).TotalSeconds<90&&!double.IsNaN(state.Tps);
-  Text("TpsMetric",freshTps?state.Tps.ToString("0.#")+" TPS":"— TPS");Text("TpsCaption",freshTps?state.Tick.ToString("0.#")+" мс на тик · цель ≤ 50":"Измерение после загрузки мира");
-  Text("PlayersMetric",(running&&state.Ready?state.Players.ToString():"—")+" / "+maxPlayers);Text("PlayersCaption",running?(state.Ready?"Сервер доступен в своей сети":"Дождитесь готовности мира"):"Сервер не запущен");
+  Text("TpsMetric",(freshTps?state.Tps.ToString("0.#"):"—")+" / 20");Text("TpsCaption",freshTps?(state.Tps>=19?"Без заметных задержек":"Есть задержки в игре"):"Данные после запуска");Find<TextBlock>("TpsMetric").ToolTip=freshTps?state.Tick.ToString("0.#")+" мс на игровой тик. Норма: до 50.":"Измерение появится после загрузки мира.";
+  Text("PlayersMetric",(running&&state.Ready?state.Players.ToString():"—")+" / "+maxPlayers);Text("PlayersCaption",running?(state.Ready?(state.Players>0?"Друзья в общем мире":"Можно подключаться"):"Дождитесь загрузки мира"):"Ожидаем друзей");
   string names=string.Join("\n",state.Names.OrderBy(x=>x));if(names!=lastPlayers){Find<ListBox>("PlayerList").ItemsSource=state.Names.OrderBy(x=>x).ToList();lastPlayers=names;}
-  Text("ActivityLabel",state.Activity);Text("SystemMemoryLabel","На ПК свободно "+availableMemory.ToString("0.0")+" из "+totalMemory.ToString("0.#")+" ГБ ОЗУ");
+  RenderPlanetPlayers();Text("ActivityLabel",state.Activity);Text("SystemMemoryLabel","На компьютере свободно "+availableMemory.ToString("0.0")+" из "+totalMemory.ToString("0.#")+" ГБ памяти");
   string advice=ServerState.Advice(running,state.Ready,state.Oom,freshHeap?heap:double.NaN,running?launchedRam:ram,availableMemory,freshTps?state.Tps:double.NaN,freshHeap?pressure:0,state.Players,maxPlayers,(now-state.LagTime).TotalSeconds<90);
   if(advice!=lastAdvice){Text("AdviceText",advice);lastAdvice=advice;}
-  Text("FooterLabel",running?"Обновление: "+DateTime.Now.ToString("HH:mm:ss")+" · heap ≈ каждые 16 с":"Панель управляет только сервером из своей папки");
+  Text("FooterLabel",running?"Данные обновлены в "+DateTime.Now.ToString("HH:mm:ss"):"Всё остаётся на вашем компьютере");
  }
  void ProbeHeap(){
   var tool=System.IO.Path.Combine(root,"java17","bin","jcmd.exe");if(!File.Exists(tool)||!Running)return;probing=true;int pid=server.Id;
@@ -163,18 +168,23 @@ public sealed class PanelApp {
   });
  }
  void DrawChart(){var c=Find<Canvas>("MemoryChart");if(c==null)return;c.Children.Clear();double width=c.ActualWidth,height=c.ActualHeight;if(width<10||height<10)return;double max=Running?launchedRam:ram;
-  for(int i=0;i<3;i++){double y=height*i/2;var l=new Line{X1=0,X2=width,Y1=y,Y2=y,Stroke=new SolidColorBrush(Color.FromRgb(44,56,72)),StrokeThickness=1};c.Children.Add(l);}
-  Polyline poly=null;for(int i=0;i<history.Count;i++){if(double.IsNaN(history[i])){poly=null;continue;}if(poly==null){poly=new Polyline{Stroke=new SolidColorBrush(Color.FromRgb(124,225,183)),StrokeThickness=2.5};c.Children.Add(poly);}poly.Points.Add(new Point(width*i/59,height-Math.Min(1,history[i]/max)*height));}
-  if(!history.Any(v=>!double.IsNaN(v))){var text=new TextBlock{Text="График появится после замеров Java",Foreground=new SolidColorBrush(Color.FromRgb(111,128,151)),FontSize=12};Canvas.SetTop(text,height/2-8);Canvas.SetLeft(text,10);c.Children.Add(text);}
+  for(int i=0;i<3;i++){double y=height*i/2;var l=new Line{X1=0,X2=width,Y1=y,Y2=y,Stroke=new SolidColorBrush(Color.FromRgb(62,73,82)),StrokeThickness=1};c.Children.Add(l);}
+  Polyline poly=null;for(int i=0;i<history.Count;i++){if(double.IsNaN(history[i])){poly=null;continue;}if(poly==null){poly=new Polyline{Stroke=new SolidColorBrush(Color.FromRgb(201,146,108)),StrokeThickness=2.5};c.Children.Add(poly);}poly.Points.Add(new Point(width*i/59,height-Math.Min(1,history[i]/max)*height));}
+  if(!history.Any(v=>!double.IsNaN(v))){var text=new TextBlock{Text="График появится после запуска сервера",Foreground=new SolidColorBrush(Color.FromRgb(126,144,155)),FontSize=12};Canvas.SetTop(text,height/2-8);Canvas.SetLeft(text,10);c.Children.Add(text);}
  }
  sealed class Address{public string Value,Label;public override string ToString(){return Label+" — "+Value;}}
  void Addresses(){var box=Find<ComboBox>("AddressBox");box.Items.Clear();try{foreach(var nic in NetworkInterface.GetAllNetworkInterfaces().Where(a=>a.OperationalStatus==OperationalStatus.Up&&a.NetworkInterfaceType!=NetworkInterfaceType.Loopback)){foreach(var a in nic.GetIPProperties().UnicastAddresses.Where(a=>a.Address.AddressFamily==AddressFamily.InterNetwork&&!a.Address.ToString().StartsWith("169.254.")))box.Items.Add(new Address{Label=nic.Name,Value=a.Address+":"+Port});}}catch{}box.Items.Add(new Address{Label="Только для хоста на этом ПК",Value="localhost:"+Port});box.SelectedIndex=0;}
  void OpenPath(string path){try{Process.Start(new ProcessStartInfo(path){UseShellExecute=true});}catch(Exception ex){Message(ex.Message);}}
+ void CaptureView(){
+  if(timer!=null)timer.Stop();w.UpdateLayout();RenderPlanetPlayers();if(captureDemo){Text("PlayersMetric","3 / 10");Text("PlayersCaption","Пример отображения игроков");Text("PlanetCaption","Пример · маркеры игроков, не реальные координаты");}w.UpdateLayout();
+  var content=(FrameworkElement)w.Content;
+  var bitmap=new RenderTargetBitmap((int)content.ActualWidth,(int)content.ActualHeight,96,96,PixelFormats.Pbgra32);bitmap.Render(content);var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(bitmap));using(var fs=File.Create(capturePath))encoder.Save(fs);w.Close();
+ }
  void BeginIntegration(){
   if(!File.Exists(System.IO.Path.Combine(root,"MOCK-ONLY")))throw new InvalidOperationException("Integration requires a mock fixture");
   Start();DateTime begin=DateTime.UtcNow;bool verified=false;var testTimer=new DispatcherTimer{Interval=TimeSpan.FromSeconds(1)};
   testTimer.Tick+=(s,e)=>{try{
-   if(Running&&state.Ready&&!verified){Send("list");Send("forge tps");if(!probing)ProbeHeap();if(state.Players==2&&state.Names.Contains("Alex")&&state.Tps==20&&!double.IsNaN(heap)&&Math.Abs(heap-1)<0.001){verified=true;Stop();}}
+   if(Running&&state.Ready&&!verified){Send("list");Send("forge tps");if(!probing)ProbeHeap();if(state.Players==2&&state.Names.Contains("Alex")&&state.Tps==20&&!double.IsNaN(heap)&&Math.Abs(heap-1)<0.001){RenderPlanetPlayers();if(Find<Canvas>("PlanetOverlay").Children.Count!=2)throw new Exception("Online player markers missing");verified=true;Stop();}}
    if(verified&&!Running){if(!File.Exists(System.IO.Path.Combine(root,"mock-graceful-stop.txt")))throw new Exception("Graceful shutdown marker missing");if(!File.ReadAllText(System.IO.Path.Combine(root,"user_jvm_args.txt")).Contains("-Dkeep.test=true"))throw new Exception("Custom JVM option lost");File.WriteAllText(integrationResult,"PASS: real redirected child process, ready-state, player list, TPS command response, Java heap probe, graceful stop, settings saved, custom JVM flag preserved.");testTimer.Stop();w.Close();}
    else if((DateTime.UtcNow-begin).TotalSeconds>25)throw new Exception("Integration timed out");
   }catch(Exception ex){testTimer.Stop();if(Running)try{server.Kill();server.WaitForExit(3000);}catch{}File.WriteAllText(integrationResult,"FAIL: "+ex);w.Close();}};
@@ -182,7 +192,7 @@ public sealed class PanelApp {
  }
  [STAThread]public static int Main(string[] args){
   if(args.Length>0&&args[0]=="--self-test")return SelfTest(args.Length>1?args[1]:"panel-self-test.txt");
-  if(args.Length>1&&args[0]=="--capture")capturePath=System.IO.Path.GetFullPath(args[1]);
+  if(args.Length>1&&(args[0]=="--capture"||args[0]=="--capture-demo")){capturePath=System.IO.Path.GetFullPath(args[1]);captureDemo=args[0]=="--capture-demo";if(args.Length>2)int.TryParse(args[2],out captureTab);}
   if(args.Length>2&&args[0]=="--integration-test"){integrationMode=true;integrationResult=System.IO.Path.GetFullPath(args[2]);try{string fixture=System.IO.Path.GetFullPath(args[1]);if(!File.Exists(System.IO.Path.Combine(fixture,"MOCK-ONLY")))return 2;new PanelApp(fixture).Run();return File.Exists(integrationResult)&&File.ReadAllText(integrationResult).StartsWith("PASS")?0:1;}catch(Exception ex){File.WriteAllText(integrationResult,"FAIL: "+ex);return 1;}}
   try{new PanelApp(AppDomain.CurrentDomain.BaseDirectory).Run();return 0;}catch(Exception ex){try{File.WriteAllText(System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"panel-error.txt"),ex.ToString());}catch{}MessageBox.Show("Не удалось открыть панель: "+ex.Message,"TFG");return 1;}
  }
