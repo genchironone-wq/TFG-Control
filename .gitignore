@@ -1,0 +1,17 @@
+*.exe
+*.zip
+*.sha256
+*.log
+*.tmp
+*.panel-tmp
+panel-error.txt
+self-test.txt
+integration-test.txt
+.tfg-panel.lock
+world/
+logs/
+crash-reports/
+java17/
+libraries/
+mods/
+eula.txt
